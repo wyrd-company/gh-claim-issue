@@ -163,6 +163,15 @@ func (c *Client) AddAssignee(owner, repo string, number int, login string) error
 	return c.REST.Post(path, jsonBody(body), nil)
 }
 
+// RemoveAssignee unassigns login from the issue.
+func (c *Client) RemoveAssignee(owner, repo string, number int, login string) error {
+	body := struct {
+		Assignees []string `json:"assignees"`
+	}{Assignees: []string{login}}
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/assignees", owner, repo, number)
+	return c.REST.Do(http.MethodDelete, path, jsonBody(body), nil)
+}
+
 // SearchOpenAssignedTo returns open issues assigned to login across all
 // repos visible to the viewer. Used to enforce the "one in-flight per
 // agent" rule when a sub-agent field is configured.

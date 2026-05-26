@@ -131,3 +131,29 @@ func (c *Client) SetIssueTextField(owner, repo string, number int, fieldID int64
 	path := fmt.Sprintf("repos/%s/%s/issues/%d/issue-field-values", owner, repo, number)
 	return c.REST.Put(path, jsonBody(body), nil)
 }
+
+// ClearIssueTextField removes the value of fieldID by sending a PUT that
+// replays every other current value and drops this one.
+func (c *Client) ClearIssueTextField(owner, repo string, number int, fieldID int64) error {
+	existing, err := c.GetIssueFieldValues(owner, repo, number)
+	if err != nil {
+		return err
+	}
+	type writeVal struct {
+		FieldID int64       `json:"field_id"`
+		Value   interface{} `json:"value"`
+	}
+	body := make([]writeVal, 0, len(existing))
+	for _, v := range existing {
+		if v.FieldID == fieldID {
+			continue
+		}
+		var raw interface{}
+		if err := json.Unmarshal(v.Value, &raw); err != nil {
+			raw = nil
+		}
+		body = append(body, writeVal{FieldID: v.FieldID, Value: raw})
+	}
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/issue-field-values", owner, repo, number)
+	return c.REST.Put(path, jsonBody(body), nil)
+}
