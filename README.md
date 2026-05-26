@@ -11,7 +11,7 @@ and the next call returns a different one.
 ## Install
 
 ```sh
-gh extension install boblangley/gh-claim-issue
+gh extension install wyrd-company/gh-claim-issue
 ```
 
 ## Usage
