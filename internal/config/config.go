@@ -40,6 +40,16 @@ type Config struct {
 	// ClaimStatus, when set with ProjectID, names the Status option the
 	// project item is moved to immediately after a successful claim.
 	ClaimStatus string `yaml:"claim_status"`
+
+	// ProjectIteration, when set with ProjectID, restricts the candidate
+	// pool to items whose Iteration field matches. Accepted values:
+	//
+	//   "current" — the iteration containing today's date
+	//   "next"    — the iteration immediately after current
+	//   anything else — matched against iteration titles literally
+	//
+	// Items with no iteration assignment are excluded when this is set.
+	ProjectIteration string `yaml:"project_iteration"`
 }
 
 // Path returns the conventional location of the config file:
@@ -85,6 +95,9 @@ func (c *Config) validate() error {
 	}
 	if c.ClaimStatus != "" && c.ProjectID == "" {
 		return errors.New("claim_status requires project_id")
+	}
+	if c.ProjectIteration != "" && c.ProjectID == "" {
+		return errors.New("project_iteration requires project_id")
 	}
 	return nil
 }
@@ -134,4 +147,9 @@ const sample = `# gh-claim-issue configuration
 # When project_id is set, move the item to this Status immediately after
 # a successful claim. Must be one of the project's Status options.
 # claim_status: "In Progress"
+
+# When project_id is set, restrict to items whose Iteration field matches.
+# Accepted: "current", "next", or a literal iteration title (e.g. "Sprint 4").
+# Items with no iteration are excluded.
+# project_iteration: "current"
 `

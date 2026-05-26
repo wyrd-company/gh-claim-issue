@@ -29,11 +29,17 @@ func (f *ProjectStatusField) FindOption(name string) *ProjectStatusOption {
 }
 
 // ProjectItem links an issue to its position on a Projects v2 board and
-// carries the current Status value (when projected).
+// carries projected field values (Status, Iteration, SubAgent).
 type ProjectItem struct {
-	ItemID     string
-	Issue      Issue
-	StatusName string
+	ItemID         string
+	Issue          Issue
+	StatusName     string
+	IterationID    string
+	IterationTitle string
+	// SubAgentText is the text value of the project's sub-agent field, if
+	// one is configured at the project level. (The org-level sub-agent
+	// field, when used instead, is read separately via issue-field-values.)
+	SubAgentText string
 }
 
 // LookupSingleSelectField returns the metadata for a single-select field
@@ -85,9 +91,9 @@ func (c *Client) LookupSingleSelectField(projectID, fieldName string) (*ProjectS
 	return nil, fmt.Errorf("single-select field %q not found on project", fieldName)
 }
 
-// ListProjectIssues returns project items whose content is an open Issue,
-// projecting the current Status (single-select) value when statusFieldName
-// is non-empty.
+// ListProjectIssues returns project items whose content is an open Issue.
+// Projects the current Status (single-select), Iteration, and any text-typed
+// "Subagent" / "Sub Agent" / "Sub-Agent" project field values when present.
 func (c *Client) ListProjectIssues(projectID, statusFieldName string, limit int) ([]ProjectItem, error) {
 	const query = `
 	query($id:ID!,$first:Int!,$after:String) {
@@ -111,6 +117,15 @@ func (c *Client) ListProjectIssues(projectID, statusFieldName string, limit int)
 	              __typename
 	              ... on ProjectV2ItemFieldSingleSelectValue {
 	                name
+	                field { ... on ProjectV2FieldCommon { name } }
+	              }
+	              ... on ProjectV2ItemFieldIterationValue {
+	                iterationId
+	                title
+	                field { ... on ProjectV2FieldCommon { name } }
+	              }
+	              ... on ProjectV2ItemFieldTextValue {
+	                text
 	                field { ... on ProjectV2FieldCommon { name } }
 	              }
 	            }
@@ -157,9 +172,12 @@ func (c *Client) ListProjectIssues(projectID, statusFieldName string, limit int)
 						}
 						FieldValues struct {
 							Nodes []struct {
-								Typename string `json:"__typename"`
-								Name     string
-								Field    struct{ Name string }
+								Typename    string `json:"__typename"`
+								Name        string
+								IterationID string
+								Title       string
+								Text        string
+								Field       struct{ Name string }
 							}
 						}
 					}
@@ -186,12 +204,20 @@ func (c *Client) ListProjectIssues(projectID, statusFieldName string, limit int)
 			for _, a := range n.Content.Assignees.Nodes {
 				item.Issue.Assignees = append(item.Issue.Assignees, a.Login)
 			}
-			if statusFieldName != "" {
-				for _, fv := range n.FieldValues.Nodes {
-					if fv.Typename == "ProjectV2ItemFieldSingleSelectValue" &&
-						equalFold(fv.Field.Name, statusFieldName) {
+			for _, fv := range n.FieldValues.Nodes {
+				switch fv.Typename {
+				case "ProjectV2ItemFieldSingleSelectValue":
+					if statusFieldName != "" && equalFold(fv.Field.Name, statusFieldName) {
 						item.StatusName = fv.Name
-						break
+					}
+				case "ProjectV2ItemFieldIterationValue":
+					if equalFold(fv.Field.Name, "Iteration") {
+						item.IterationID = fv.IterationID
+						item.IterationTitle = fv.Title
+					}
+				case "ProjectV2ItemFieldTextValue":
+					if isSubAgentFieldName(fv.Field.Name) {
+						item.SubAgentText = fv.Text
 					}
 				}
 			}
@@ -222,6 +248,21 @@ func (c *Client) SetSingleSelectField(projectID, itemID, fieldID, optionID strin
 		return fmt.Errorf("set single-select field: %w", err)
 	}
 	return nil
+}
+
+// isSubAgentFieldName matches common spellings of a sub-agent text field
+// on a Projects v2 board (used by `list` to display who has what claimed
+// without an explicit org-level sub_agent_field configuration).
+func isSubAgentFieldName(name string) bool {
+	switch {
+	case equalFold(name, "subagent"),
+		equalFold(name, "sub agent"),
+		equalFold(name, "sub-agent"),
+		equalFold(name, "agent"),
+		equalFold(name, "claimed by"):
+		return true
+	}
+	return false
 }
 
 func equalFold(a, b string) bool {

@@ -18,20 +18,22 @@ import (
 type Options struct {
 	Owner     string // target repo owner; empty in project mode means "any"
 	Repo      string // target repo name; empty in project mode means "any"
-	ProjectID string // overrides config.ProjectID when non-empty
+	ProjectID string // pre-resolved (flag > env > config); empty falls back to cfg.ProjectID
 	AgentName string        // optional; required when config.SubAgentField is set
 	LockWait  time.Duration // total time to wait for the cross-process lock
+	DryRun    bool          // resolve the candidate but do not mutate
 }
 
 // Result describes the issue that was claimed.
 type Result struct {
-	Number       int
-	Title        string
-	URL          string
-	Assignee     string
-	AgentName    string
-	StatusMoved  string
-	LockPath     string
+	Number      int
+	Title       string
+	URL         string
+	Assignee    string
+	AgentName   string
+	StatusMoved string
+	LockPath    string
+	DryRun      bool
 }
 
 // Run performs one claim attempt against the given repository.
@@ -99,6 +101,19 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		}
 	}
 
+	var iterationFilterID string
+	if projectID != "" && cfg.ProjectIteration != "" {
+		itField, err := gh.LookupIterationField(projectID, "Iteration")
+		if err != nil {
+			return nil, err
+		}
+		it, err := resolveIteration(itField, cfg.ProjectIteration)
+		if err != nil {
+			return nil, err
+		}
+		iterationFilterID = it.ID
+	}
+
 	// Enforce the "one open issue per (agent name)" rule before touching
 	// candidates so we fail fast.
 	if cfg.SubAgentField != "" {
@@ -114,7 +129,7 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		}
 	}
 
-	candidates, err := buildCandidates(gh, cfg, projectID, agentField, opts)
+	candidates, err := buildCandidates(gh, cfg, projectID, agentField, iterationFilterID, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -122,6 +137,22 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		return nil, errors.New("no available issues match the configured rules")
 	}
 	chosen := candidates[0]
+
+	if opts.DryRun {
+		res := &Result{
+			Number:    chosen.Issue.Number,
+			Title:     chosen.Issue.Title,
+			URL:       chosen.Issue.URL,
+			Assignee:  viewer,
+			AgentName: opts.AgentName,
+			LockPath:  lockPath,
+			DryRun:    true,
+		}
+		if statusOptID != "" {
+			res.StatusMoved = cfg.ClaimStatus
+		}
+		return res, nil
+	}
 
 	if err := gh.AddAssignee(chosen.Issue.Repository.Owner, chosen.Issue.Repository.Name, chosen.Issue.Number, viewer); err != nil {
 		return nil, fmt.Errorf("assign %s: %w", chosen.Issue.URL, err)
@@ -155,10 +186,35 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 	return res, nil
 }
 
-func buildCandidates(gh *ghapi.Client, cfg *config.Config, projectID string, agentField *ghapi.OrgIssueField, opts Options) ([]ghapi.ProjectItem, error) {
+// resolveIteration maps a config value ("current", "next", or a literal
+// title) to a concrete iteration on the project. Returns an error when
+// the requested iteration doesn't exist.
+func resolveIteration(field *ghapi.ProjectIterationField, spec string) (*ghapi.ProjectIteration, error) {
+	switch strings.ToLower(strings.TrimSpace(spec)) {
+	case "current":
+		it := field.Current()
+		if it == nil {
+			return nil, errors.New("project_iteration is \"current\" but no iteration is active today")
+		}
+		return it, nil
+	case "next":
+		it := field.Next()
+		if it == nil {
+			return nil, errors.New("project_iteration is \"next\" but no upcoming iteration is configured")
+		}
+		return it, nil
+	}
+	it := field.FindByTitle(spec)
+	if it == nil {
+		return nil, fmt.Errorf("project_iteration %q does not match any iteration title on the project", spec)
+	}
+	return it, nil
+}
+
+func buildCandidates(gh *ghapi.Client, cfg *config.Config, projectID string, agentField *ghapi.OrgIssueField, iterationFilterID string, opts Options) ([]ghapi.ProjectItem, error) {
 	var pool []ghapi.ProjectItem
 	if projectID != "" {
-		items, err := projectCandidates(gh, cfg, projectID, opts)
+		items, err := projectCandidates(gh, cfg, projectID, iterationFilterID, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -216,7 +272,7 @@ func repoCandidates(gh *ghapi.Client, cfg *config.Config, opts Options) ([]ghapi
 	return out, nil
 }
 
-func projectCandidates(gh *ghapi.Client, cfg *config.Config, projectID string, opts Options) ([]ghapi.ProjectItem, error) {
+func projectCandidates(gh *ghapi.Client, cfg *config.Config, projectID, iterationFilterID string, opts Options) ([]ghapi.ProjectItem, error) {
 	statusField := ""
 	if len(cfg.ProjectStatuses) > 0 {
 		statusField = "Status"
@@ -245,6 +301,9 @@ func projectCandidates(gh *ghapi.Client, cfg *config.Config, projectID string, o
 			if _, ok := allowedStatus[strings.ToLower(it.StatusName)]; !ok {
 				continue
 			}
+		}
+		if iterationFilterID != "" && it.IterationID != iterationFilterID {
+			continue
 		}
 		blocked, err := gh.BlockedBy(it.Issue.Repository.Owner, it.Issue.Repository.Name, it.Issue.Number)
 		if err != nil {

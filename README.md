@@ -33,6 +33,9 @@ gh claim-issue --project
 # Override the configured project, and narrow to one repo:
 gh claim-issue --project=PVT_kwDOABCDEF --repo wyrd-company/widgets
 
+# Check whether work is available without taking it:
+gh claim-issue --dry-run
+
 # Machine-readable output:
 gh claim-issue --json
 ```
@@ -42,9 +45,19 @@ gh claim-issue --json
 | Command | Description |
 |---|---|
 | `gh claim-issue` | Claim the first available issue (default flow). |
+| `gh claim-issue release [--issue N]` | Clear your claim on an issue (the one you currently hold by default). `--force --agent-name X` lets an orchestrator recover a crashed agent's claim. Optional `--release-status STATUS` moves the project item back to a holding column. |
+| `gh claim-issue set-status <ISSUE> <STATUS>` | Move an issue's project Status to a named option. Resolves `project_id` + Status field + option name itself, so no GraphQL ids are needed. |
+| `gh claim-issue handoff <ISSUE> --note "…"` | Atomic `set-status` → `Review` + comment. Pass `--block "reason"` to move to `Blocked` and stamp the `blocked` label instead. |
+| `gh claim-issue list [--agent-name X] [--mine]` | List project items annotated with who holds each (orchestrator visibility). |
 | `gh claim-issue generate-name` | Print one random `adjective-noun` name (50×50 = 2,500 combos, last 20 suppressed). |
 | `gh claim-issue init-config` | Scaffold a commented `config.yml` at the default location. |
 | `gh claim-issue help` | Print usage. |
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `GH_CLAIM_ISSUE_PROJECT_ID` | Project id. Precedence is `--project=ID` > `GH_CLAIM_ISSUE_PROJECT_ID` > `config.project_id`. Lets CI / orchestrators inject project context (or override a checked-in config) without editing the YAML. |
 
 ## Availability rules
 
@@ -114,6 +127,15 @@ project_statuses:
 # When project_id is set, move the claimed item to this Status option
 # immediately after assignment.
 claim_status: "In Progress"
+
+# When project_id is set, bound the candidate pool to one iteration on the
+# project's Iteration field. Values:
+#   "current" — the iteration containing today's date
+#   "next"    — the iteration after current (or the next upcoming if none
+#               is currently active)
+#   "<title>" — a literal iteration title
+# Items with no iteration assignment are excluded.
+project_iteration: "current"
 ```
 
 ### About `sub_agent_field`
@@ -130,6 +152,16 @@ name" check is genuinely global.
 Requires `project_id`. The value must be one of the options on the
 project's `Status` single-select field. A typo fails the run before
 any mutation happens.
+
+### About `project_iteration`
+
+Requires `project_id`. Pairs with the project's built-in `Iteration`
+field — useful for bounding the claimable pool to the active sprint
+without having to maintain `iteration:current` labels by hand. `"current"`
+resolves the iteration whose date window contains today; `"next"` picks
+the one right after, or the closest upcoming iteration if none is
+currently active. A literal title is matched case-insensitively against
+both active and completed iterations.
 
 ## Multi-agent coordination
 
