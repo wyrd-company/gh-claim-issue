@@ -89,8 +89,8 @@ func cmdClaim(args []string) error {
 	}
 
 	if *jsonOut {
-		fmt.Printf(`{"number":%d,"url":%q,"title":%q,"assignee":%q,"agent_name":%q,"config":%q}`+"\n",
-			res.Number, res.URL, res.Title, res.Assignee, res.AgentName, cfgPath)
+		fmt.Printf(`{"number":%d,"url":%q,"title":%q,"assignee":%q,"agent_name":%q,"status":%q,"config":%q}`+"\n",
+			res.Number, res.URL, res.Title, res.Assignee, res.AgentName, res.StatusMoved, cfgPath)
 		return nil
 	}
 	fmt.Printf("claimed #%d %s\n", res.Number, res.Title)
@@ -98,6 +98,9 @@ func cmdClaim(args []string) error {
 	fmt.Printf("  assignee:   %s\n", res.Assignee)
 	if res.AgentName != "" {
 		fmt.Printf("  agent:      %s\n", res.AgentName)
+	}
+	if res.StatusMoved != "" {
+		fmt.Printf("  status:     %s\n", res.StatusMoved)
 	}
 	return nil
 }

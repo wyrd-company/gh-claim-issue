@@ -14,11 +14,11 @@ import (
 // Config represents the on-disk configuration. Every field is optional;
 // an absent file is equivalent to an empty Config.
 type Config struct {
-	// SubAgentField is the *name* of a Projects v2 text field used to
-	// stamp an agent's identity onto an issue when it claims it.
-	// When set, an issue is unavailable if this field already has a value,
-	// and an agent cannot claim if it already owns an open issue carrying
-	// its own identifier in the same field.
+	// SubAgentField is the *name* of an organisation-level GitHub Issue
+	// Field (text type) used to stamp an agent's identity onto an issue
+	// when it claims it.  When set, an issue is unavailable if this
+	// field already has a value, and an agent cannot claim if it already
+	// owns an open issue carrying its own identifier in the same field.
 	SubAgentField string `yaml:"sub_agent_field"`
 
 	// ExcludeLabels removes issues carrying ANY of these labels from
@@ -36,6 +36,10 @@ type Config struct {
 	// ProjectStatuses (when non-empty, requires ProjectID) limits the pool
 	// to project items whose Status field is one of these values.
 	ProjectStatuses []string `yaml:"project_statuses"`
+
+	// ClaimStatus, when set with ProjectID, names the Status option the
+	// project item is moved to immediately after a successful claim.
+	ClaimStatus string `yaml:"claim_status"`
 }
 
 // Path returns the conventional location of the config file:
@@ -79,8 +83,8 @@ func (c *Config) validate() error {
 	if len(c.ProjectStatuses) > 0 && c.ProjectID == "" {
 		return errors.New("project_statuses requires project_id")
 	}
-	if c.SubAgentField != "" && c.ProjectID == "" {
-		return errors.New("sub_agent_field requires project_id (the field lives on a project)")
+	if c.ClaimStatus != "" && c.ProjectID == "" {
+		return errors.New("claim_status requires project_id")
 	}
 	return nil
 }
@@ -103,11 +107,11 @@ const sample = `# gh-claim-issue configuration
 #
 # All fields are optional. Delete or comment-out any you don't need.
 
-# Projects v2 text field used by agents to stamp their identity on an
-# issue when they claim it. When set:
+# Name of an organisation-level GitHub Issue Field (text type) used by
+# agents to stamp their identity on an issue when they claim it. When set:
 #   - an issue is unavailable while this field already has a value
 #   - an agent cannot claim if it already holds an open issue tagged
-#     with its own --agent-name in this field
+#     with its own --agent-name in this field (across the whole org)
 # sub_agent_field: "Claimed By"
 
 # Skip issues that carry any of these labels.
@@ -126,4 +130,8 @@ const sample = `# gh-claim-issue configuration
 # project_statuses:
 #   - Todo
 #   - Ready
+
+# When project_id is set, move the item to this Status immediately after
+# a successful claim. Must be one of the project's Status options.
+# claim_status: "In Progress"
 `

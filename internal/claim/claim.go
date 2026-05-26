@@ -24,12 +24,13 @@ type Options struct {
 
 // Result describes the issue that was claimed.
 type Result struct {
-	Number    int
-	Title     string
-	URL       string
-	Assignee  string
-	AgentName string
-	LockPath  string
+	Number       int
+	Title        string
+	URL          string
+	Assignee     string
+	AgentName    string
+	StatusMoved  string
+	LockPath     string
 }
 
 // Run performs one claim attempt against the given repository.
@@ -38,7 +39,6 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		return nil, errors.New("config has sub_agent_field set; pass --agent-name to identify this agent")
 	}
 
-	// Serialise concurrent local agents racing for the same repo.
 	lockCtx, cancel := context.WithTimeout(ctx, opts.LockWait)
 	defer cancel()
 	release, lockPath, err := lock.Acquire(lockCtx, opts.Owner+"/"+opts.Repo, 250*time.Millisecond)
@@ -52,32 +52,41 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		return nil, err
 	}
 
-	// When projects are involved, resolve the field metadata up front.
+	// Resolve project + field metadata up front so a misconfigured setup
+	// fails fast (before we mutate anything).
 	var (
-		agentField  *ghapi.ProjectField
-		statusField *ghapi.ProjectField
+		agentField  *ghapi.OrgIssueField
+		statusField *ghapi.ProjectStatusField
+		statusOptID string
 	)
 	if cfg.SubAgentField != "" {
-		agentField, err = gh.LookupField(cfg.ProjectID, cfg.SubAgentField)
+		f, err := gh.FindOrgIssueField(opts.Owner, cfg.SubAgentField)
 		if err != nil {
 			return nil, err
 		}
-		if !strings.EqualFold(agentField.Type, "TEXT") {
-			return nil, fmt.Errorf("sub_agent_field %q must be a text field (is %s)", cfg.SubAgentField, agentField.Type)
+		if !strings.EqualFold(f.Type, "text") {
+			return nil, fmt.Errorf("sub_agent_field %q must be a text issue field (is %s)", cfg.SubAgentField, f.Type)
 		}
+		agentField = f
 	}
-	if len(cfg.ProjectStatuses) > 0 {
-		statusField, err = gh.LookupField(cfg.ProjectID, "Status")
+	if cfg.ProjectID != "" && (len(cfg.ProjectStatuses) > 0 || cfg.ClaimStatus != "") {
+		statusField, err = gh.LookupSingleSelectField(cfg.ProjectID, "Status")
 		if err != nil {
-			return nil, fmt.Errorf("project_statuses set but %w", err)
+			return nil, err
 		}
-		_ = statusField // reserved for future option-id resolution
+		if cfg.ClaimStatus != "" {
+			opt := statusField.FindOption(cfg.ClaimStatus)
+			if opt == nil {
+				return nil, fmt.Errorf("claim_status %q is not an option on the project's Status field", cfg.ClaimStatus)
+			}
+			statusOptID = opt.ID
+		}
 	}
 
-	// Enforce the "one open issue per (viewer, agent name)" rule before
-	// touching candidates, so we fail fast.
+	// Enforce the "one open issue per (agent name)" rule before touching
+	// candidates so we fail fast.
 	if cfg.SubAgentField != "" {
-		held, err := findHeldByAgent(gh, cfg, viewer, opts.AgentName)
+		held, err := findHeldByAgent(gh, agentField, viewer, opts.AgentName)
 		if err != nil {
 			return nil, err
 		}
@@ -89,52 +98,84 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		}
 	}
 
-	// Build the candidate pool.
-	candidates, err := buildCandidates(gh, cfg, opts)
+	candidates, err := buildCandidates(gh, cfg, agentField, opts)
 	if err != nil {
 		return nil, err
 	}
 	if len(candidates) == 0 {
 		return nil, errors.New("no available issues match the configured rules")
 	}
-
 	chosen := candidates[0]
 
-	// Perform the claim. Both assignment and (if configured) field stamp
-	// must succeed for the claim to count.
 	if err := gh.AddAssignee(chosen.Issue.Repository.Owner, chosen.Issue.Repository.Name, chosen.Issue.Number, viewer); err != nil {
 		return nil, fmt.Errorf("assign %s: %w", chosen.Issue.URL, err)
 	}
-	if cfg.SubAgentField != "" {
-		itemID := chosen.ItemID
-		if itemID == "" {
-			itemID, err = gh.AddIssueToProject(cfg.ProjectID, chosen.Issue.ID)
-			if err != nil {
-				return nil, fmt.Errorf("add %s to project: %w", chosen.Issue.URL, err)
-			}
-		}
-		if err := gh.SetTextField(cfg.ProjectID, itemID, agentField.ID, opts.AgentName); err != nil {
+
+	if agentField != nil {
+		if err := gh.SetIssueTextField(chosen.Issue.Repository.Owner, chosen.Issue.Repository.Name, chosen.Issue.Number, agentField.ID, opts.AgentName); err != nil {
 			return nil, fmt.Errorf("stamp agent field on %s: %w", chosen.Issue.URL, err)
 		}
 	}
 
-	return &Result{
+	res := &Result{
 		Number:    chosen.Issue.Number,
 		Title:     chosen.Issue.Title,
 		URL:       chosen.Issue.URL,
 		Assignee:  viewer,
 		AgentName: opts.AgentName,
 		LockPath:  lockPath,
-	}, nil
+	}
+
+	if statusOptID != "" {
+		if chosen.ItemID == "" {
+			return res, fmt.Errorf("claim_status requested but %s has no project item (project_id mismatch?)", chosen.Issue.URL)
+		}
+		if err := gh.SetSingleSelectField(cfg.ProjectID, chosen.ItemID, statusField.FieldID, statusOptID); err != nil {
+			return res, fmt.Errorf("move %s to status %q: %w", chosen.Issue.URL, cfg.ClaimStatus, err)
+		}
+		res.StatusMoved = cfg.ClaimStatus
+	}
+
+	return res, nil
 }
 
-// buildCandidates returns the filtered, ordered pool of issues we could
-// claim. The first element is the one Run picks.
-func buildCandidates(gh *ghapi.Client, cfg *config.Config, opts Options) ([]ghapi.ProjectItem, error) {
+func buildCandidates(gh *ghapi.Client, cfg *config.Config, agentField *ghapi.OrgIssueField, opts Options) ([]ghapi.ProjectItem, error) {
+	var pool []ghapi.ProjectItem
 	if cfg.ProjectID != "" {
-		return projectCandidates(gh, cfg, opts)
+		items, err := projectCandidates(gh, cfg, opts)
+		if err != nil {
+			return nil, err
+		}
+		pool = items
+	} else {
+		items, err := repoCandidates(gh, cfg, opts)
+		if err != nil {
+			return nil, err
+		}
+		pool = items
 	}
-	return repoCandidates(gh, cfg, opts)
+
+	if agentField == nil {
+		return pool, nil
+	}
+	out := make([]ghapi.ProjectItem, 0, len(pool))
+	for _, it := range pool {
+		vals, err := gh.GetIssueFieldValues(it.Issue.Repository.Owner, it.Issue.Repository.Name, it.Issue.Number)
+		if err != nil {
+			return nil, err
+		}
+		taken := false
+		for _, v := range vals {
+			if v.FieldID == agentField.ID && strings.TrimSpace(v.AsText()) != "" {
+				taken = true
+				break
+			}
+		}
+		if !taken {
+			out = append(out, it)
+		}
+	}
+	return out, nil
 }
 
 func repoCandidates(gh *ghapi.Client, cfg *config.Config, opts Options) ([]ghapi.ProjectItem, error) {
@@ -160,14 +201,17 @@ func repoCandidates(gh *ghapi.Client, cfg *config.Config, opts Options) ([]ghapi
 }
 
 func projectCandidates(gh *ghapi.Client, cfg *config.Config, opts Options) ([]ghapi.ProjectItem, error) {
-	items, err := gh.ListProjectIssues(cfg.ProjectID, "Status", cfg.SubAgentField, 500)
+	statusField := ""
+	if len(cfg.ProjectStatuses) > 0 {
+		statusField = "Status"
+	}
+	items, err := gh.ListProjectIssues(cfg.ProjectID, statusField, 500)
 	if err != nil {
 		return nil, err
 	}
 	allowedStatus := lowerSet(cfg.ProjectStatuses)
 	out := make([]ghapi.ProjectItem, 0, len(items))
 	for _, it := range items {
-		// Restrict to the repo this invocation targets.
 		if !strings.EqualFold(it.Issue.Repository.Owner, opts.Owner) ||
 			!strings.EqualFold(it.Issue.Repository.Name, opts.Repo) {
 			continue
@@ -183,9 +227,6 @@ func projectCandidates(gh *ghapi.Client, cfg *config.Config, opts Options) ([]gh
 				continue
 			}
 		}
-		if cfg.SubAgentField != "" && strings.TrimSpace(it.AgentValue) != "" {
-			continue
-		}
 		blocked, err := gh.BlockedBy(opts.Owner, opts.Repo, it.Issue.Number)
 		if err != nil {
 			return nil, err
@@ -198,27 +239,24 @@ func projectCandidates(gh *ghapi.Client, cfg *config.Config, opts Options) ([]gh
 	return out, nil
 }
 
-// findHeldByAgent returns an open issue already claimed by agentName on
-// the configured project, or nil if none.
-func findHeldByAgent(gh *ghapi.Client, cfg *config.Config, viewer, agentName string) (*ghapi.Issue, error) {
-	items, err := gh.ListProjectIssues(cfg.ProjectID, "", cfg.SubAgentField, 500)
+// findHeldByAgent looks across every open issue assigned to the viewer
+// (any repo) for one whose org-level sub-agent field already carries this
+// agent's name.
+func findHeldByAgent(gh *ghapi.Client, agentField *ghapi.OrgIssueField, viewer, agentName string) (*ghapi.Issue, error) {
+	mine, err := gh.SearchOpenAssignedTo(viewer)
 	if err != nil {
 		return nil, err
 	}
-	for _, it := range items {
-		if !strings.EqualFold(strings.TrimSpace(it.AgentValue), agentName) {
-			continue
+	for _, is := range mine {
+		vals, err := gh.GetIssueFieldValues(is.Repository.Owner, is.Repository.Name, is.Number)
+		if err != nil {
+			return nil, err
 		}
-		assignedToViewer := false
-		for _, a := range it.Issue.Assignees {
-			if strings.EqualFold(a, viewer) {
-				assignedToViewer = true
-				break
+		for _, v := range vals {
+			if v.FieldID == agentField.ID && strings.EqualFold(strings.TrimSpace(v.AsText()), agentName) {
+				held := is
+				return &held, nil
 			}
-		}
-		if assignedToViewer {
-			held := it.Issue
-			return &held, nil
 		}
 	}
 	return nil, nil

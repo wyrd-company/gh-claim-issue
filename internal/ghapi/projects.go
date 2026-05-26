@@ -4,41 +4,50 @@ import (
 	"fmt"
 )
 
-// ProjectField describes one field on a Projects v2 board.
-type ProjectField struct {
-	ID      string
-	Name    string
-	Type    string   // "TEXT" or "SINGLE_SELECT"
-	Options []ProjectFieldOption
+// ProjectStatusField is the metadata needed to flip a project item's
+// Status (single-select) field to a chosen option.
+type ProjectStatusField struct {
+	FieldID  string
+	Name     string
+	Options  []ProjectStatusOption
 }
 
-// ProjectFieldOption is a single-select option (name/id pair).
-type ProjectFieldOption struct {
+// ProjectStatusOption is one option on a single-select field.
+type ProjectStatusOption struct {
 	ID   string
 	Name string
 }
 
-// ProjectItem links an issue to its position on a Projects v2 board,
-// along with the values currently set on the fields we care about.
+// FindOption returns the option matching name (case-insensitive), or nil.
+func (f *ProjectStatusField) FindOption(name string) *ProjectStatusOption {
+	for i := range f.Options {
+		if equalFold(f.Options[i].Name, name) {
+			return &f.Options[i]
+		}
+	}
+	return nil
+}
+
+// ProjectItem links an issue to its position on a Projects v2 board and
+// carries the current Status value (when projected).
 type ProjectItem struct {
 	ItemID     string
 	Issue      Issue
 	StatusName string
-	AgentValue string
 }
 
-// LookupField finds a field on a project by case-insensitive name. The
-// returned struct includes single-select options when applicable.
-func (c *Client) LookupField(projectID, fieldName string) (*ProjectField, error) {
+// LookupSingleSelectField returns the metadata for a single-select field
+// on the given project. Used to find the Status field (and its options)
+// for the claim_status transition.
+func (c *Client) LookupSingleSelectField(projectID, fieldName string) (*ProjectStatusField, error) {
 	const query = `
 	query($id:ID!) {
 	  node(id:$id) {
 	    ... on ProjectV2 {
 	      fields(first:100) {
 	        nodes {
-	          ... on ProjectV2Field { id name dataType }
 	          ... on ProjectV2SingleSelectField {
-	            id name dataType
+	            id name
 	            options { id name }
 	          }
 	        }
@@ -50,10 +59,9 @@ func (c *Client) LookupField(projectID, fieldName string) (*ProjectField, error)
 		Node struct {
 			Fields struct {
 				Nodes []struct {
-					ID       string
-					Name     string
-					DataType string
-					Options  []struct {
+					ID      string
+					Name    string
+					Options []struct {
 						ID   string
 						Name string
 					}
@@ -62,25 +70,25 @@ func (c *Client) LookupField(projectID, fieldName string) (*ProjectField, error)
 		}
 	}
 	if err := c.GraphQL.Do(query, map[string]interface{}{"id": projectID}, &resp); err != nil {
-		return nil, fmt.Errorf("lookup field: %w", err)
+		return nil, fmt.Errorf("lookup single-select field: %w", err)
 	}
 	for _, f := range resp.Node.Fields.Nodes {
-		if !equalFold(f.Name, fieldName) {
+		if f.ID == "" || !equalFold(f.Name, fieldName) {
 			continue
 		}
-		pf := &ProjectField{ID: f.ID, Name: f.Name, Type: f.DataType}
+		out := &ProjectStatusField{FieldID: f.ID, Name: f.Name}
 		for _, o := range f.Options {
-			pf.Options = append(pf.Options, ProjectFieldOption{ID: o.ID, Name: o.Name})
+			out.Options = append(out.Options, ProjectStatusOption{ID: o.ID, Name: o.Name})
 		}
-		return pf, nil
+		return out, nil
 	}
-	return nil, fmt.Errorf("field %q not found on project", fieldName)
+	return nil, fmt.Errorf("single-select field %q not found on project", fieldName)
 }
 
 // ListProjectIssues returns project items whose content is an open Issue,
-// projecting the optional Status (single-select) and agent (text) fields.
-// statusFieldName/agentFieldName may be "" to skip projection.
-func (c *Client) ListProjectIssues(projectID, statusFieldName, agentFieldName string, limit int) ([]ProjectItem, error) {
+// projecting the current Status (single-select) value when statusFieldName
+// is non-empty.
+func (c *Client) ListProjectIssues(projectID, statusFieldName string, limit int) ([]ProjectItem, error) {
 	const query = `
 	query($id:ID!,$first:Int!,$after:String) {
 	  node(id:$id) {
@@ -101,10 +109,6 @@ func (c *Client) ListProjectIssues(projectID, statusFieldName, agentFieldName st
 	          fieldValues(first:50) {
 	            nodes {
 	              __typename
-	              ... on ProjectV2ItemFieldTextValue {
-	                text
-	                field { ... on ProjectV2FieldCommon { name } }
-	              }
 	              ... on ProjectV2ItemFieldSingleSelectValue {
 	                name
 	                field { ... on ProjectV2FieldCommon { name } }
@@ -154,7 +158,6 @@ func (c *Client) ListProjectIssues(projectID, statusFieldName, agentFieldName st
 						FieldValues struct {
 							Nodes []struct {
 								Typename string `json:"__typename"`
-								Text     string
 								Name     string
 								Field    struct{ Name string }
 							}
@@ -183,14 +186,13 @@ func (c *Client) ListProjectIssues(projectID, statusFieldName, agentFieldName st
 			for _, a := range n.Content.Assignees.Nodes {
 				item.Issue.Assignees = append(item.Issue.Assignees, a.Login)
 			}
-			for _, fv := range n.FieldValues.Nodes {
-				switch {
-				case statusFieldName != "" && equalFold(fv.Field.Name, statusFieldName) &&
-					fv.Typename == "ProjectV2ItemFieldSingleSelectValue":
-					item.StatusName = fv.Name
-				case agentFieldName != "" && equalFold(fv.Field.Name, agentFieldName) &&
-					fv.Typename == "ProjectV2ItemFieldTextValue":
-					item.AgentValue = fv.Text
+			if statusFieldName != "" {
+				for _, fv := range n.FieldValues.Nodes {
+					if fv.Typename == "ProjectV2ItemFieldSingleSelectValue" &&
+						equalFold(fv.Field.Name, statusFieldName) {
+						item.StatusName = fv.Name
+						break
+					}
 				}
 			}
 			out = append(out, item)
@@ -203,106 +205,21 @@ func (c *Client) ListProjectIssues(projectID, statusFieldName, agentFieldName st
 	return out, nil
 }
 
-// FindProjectItemForIssue returns the project item id for an issue on a
-// given project, plus the current value of the named text field (or "").
-// Returns "", "", nil if the issue is not on the project.
-func (c *Client) FindProjectItemForIssue(projectID string, issueNodeID string, agentFieldName string) (itemID, agentValue string, err error) {
-	const query = `
-	query($id:ID!) {
-	  node(id:$id) {
-	    ... on Issue {
-	      projectItems(first:20) {
-	        nodes {
-	          id
-	          project { id }
-	          fieldValues(first:50) {
-	            nodes {
-	              __typename
-	              ... on ProjectV2ItemFieldTextValue {
-	                text
-	                field { ... on ProjectV2FieldCommon { name } }
-	              }
-	            }
-	          }
-	        }
-	      }
-	    }
-	  }
-	}`
-	var resp struct {
-		Node struct {
-			ProjectItems struct {
-				Nodes []struct {
-					ID      string
-					Project struct{ ID string }
-					FieldValues struct {
-						Nodes []struct {
-							Typename string `json:"__typename"`
-							Text     string
-							Field    struct{ Name string }
-						}
-					}
-				}
-			}
-		}
-	}
-	if err := c.GraphQL.Do(query, map[string]interface{}{"id": issueNodeID}, &resp); err != nil {
-		return "", "", fmt.Errorf("find project item: %w", err)
-	}
-	for _, n := range resp.Node.ProjectItems.Nodes {
-		if n.Project.ID != projectID {
-			continue
-		}
-		var av string
-		if agentFieldName != "" {
-			for _, fv := range n.FieldValues.Nodes {
-				if fv.Typename == "ProjectV2ItemFieldTextValue" && equalFold(fv.Field.Name, agentFieldName) {
-					av = fv.Text
-					break
-				}
-			}
-		}
-		return n.ID, av, nil
-	}
-	return "", "", nil
-}
-
-// AddIssueToProject inserts an issue into a project and returns the new
-// item id.
-func (c *Client) AddIssueToProject(projectID, issueNodeID string) (string, error) {
+// SetSingleSelectField writes a single-select option onto a project item.
+func (c *Client) SetSingleSelectField(projectID, itemID, fieldID, optionID string) error {
 	const mut = `
-	mutation($pid:ID!,$cid:ID!) {
-	  addProjectV2ItemById(input:{projectId:$pid, contentId:$cid}) {
-	    item { id }
-	  }
-	}`
-	var resp struct {
-		AddProjectV2ItemByID struct {
-			Item struct{ ID string }
-		} `json:"addProjectV2ItemById"`
-	}
-	vars := map[string]interface{}{"pid": projectID, "cid": issueNodeID}
-	if err := c.GraphQL.Do(mut, vars, &resp); err != nil {
-		return "", fmt.Errorf("add to project: %w", err)
-	}
-	return resp.AddProjectV2ItemByID.Item.ID, nil
-}
-
-// SetTextField writes a text value to a Projects v2 text field on an item.
-func (c *Client) SetTextField(projectID, itemID, fieldID, value string) error {
-	const mut = `
-	mutation($pid:ID!,$iid:ID!,$fid:ID!,$v:String!) {
+	mutation($pid:ID!,$iid:ID!,$fid:ID!,$oid:String!) {
 	  updateProjectV2ItemFieldValue(input:{
 	    projectId:$pid, itemId:$iid, fieldId:$fid,
-	    value:{text:$v}
+	    value:{singleSelectOptionId:$oid}
 	  }) { projectV2Item { id } }
 	}`
 	vars := map[string]interface{}{
-		"pid": projectID, "iid": itemID, "fid": fieldID, "v": value,
+		"pid": projectID, "iid": itemID, "fid": fieldID, "oid": optionID,
 	}
 	var resp struct{}
 	if err := c.GraphQL.Do(mut, vars, &resp); err != nil {
-		return fmt.Errorf("set text field: %w", err)
+		return fmt.Errorf("set single-select field: %w", err)
 	}
 	return nil
 }
