@@ -18,7 +18,7 @@ import (
 type Options struct {
 	Owner     string // target repo owner; empty in project mode means "any"
 	Repo      string // target repo name; empty in project mode means "any"
-	ProjectID string // overrides config.ProjectID when non-empty
+	ProjectID string // pre-resolved (flag > env > config); empty falls back to cfg.ProjectID
 	AgentName string        // optional; required when config.SubAgentField is set
 	LockWait  time.Duration // total time to wait for the cross-process lock
 	DryRun    bool          // resolve the candidate but do not mutate

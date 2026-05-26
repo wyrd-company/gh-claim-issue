@@ -6,6 +6,7 @@ package cmds
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -67,14 +68,22 @@ func ParseIssueRef(s string) (IssueRef, error) {
 
 // ResolveProjectID picks the effective project id from explicit override,
 // env var, then config (in that order).
+// EnvProjectID is the environment variable consulted before config.
+const EnvProjectID = "GH_CLAIM_ISSUE_PROJECT_ID"
+
+// ResolveProjectID picks the effective project id from explicit override,
+// env var, then config (in that order).
 func ResolveProjectID(override string, cfg *config.Config) (string, error) {
 	if override != "" {
 		return override, nil
 	}
+	if env := strings.TrimSpace(os.Getenv(EnvProjectID)); env != "" {
+		return env, nil
+	}
 	if cfg.ProjectID != "" {
 		return cfg.ProjectID, nil
 	}
-	return "", errors.New("no project id available (set project_id in config, export GH_CLAIM_ISSUE_PROJECT_ID, or pass --project=ID)")
+	return "", errors.New("no project id available (set project_id in config, export " + EnvProjectID + ", or pass --project=ID)")
 }
 
 // FindStatusOption returns the option id for an option name on the project's

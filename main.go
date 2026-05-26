@@ -99,7 +99,7 @@ func cmdClaim(args []string) error {
 		jsonOut   = fs.Bool("json", false, "emit the claim result as JSON")
 		dryRun    = fs.Bool("dry-run", false, "resolve the candidate issue without mutating anything")
 	)
-	fs.Var(&project, "project", "project mode; bare form uses project_id from config/env, or pass --project=PVT_xxx")
+	fs.Var(&project, "project", "project mode; bare form uses env/config project id, or pass --project=PVT_xxx")
 	fs.Usage = func() { printUsage(fs.Output()) }
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -204,7 +204,7 @@ func cmdRelease(args []string) error {
 		releaseStat  = fs.String("release-status", "", "move the project item to this Status after release (e.g. \"Backlog\")")
 		jsonOut      = fs.Bool("json", false, "emit JSON")
 	)
-	fs.Var(&project, "project", "project mode; bare form uses project_id from config/env, or pass --project=PVT_xxx")
+	fs.Var(&project, "project", "project mode; bare form uses env/config project id, or pass --project=PVT_xxx")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: gh claim-issue release [--issue N] [--repo owner/name]")
 		fmt.Fprintln(fs.Output(), "                              [--force --agent-name X] [--release-status STATUS]")
@@ -279,7 +279,7 @@ func cmdSetStatus(args []string) error {
 		project projectFlag
 		jsonOut = fs.Bool("json", false, "emit JSON")
 	)
-	fs.Var(&project, "project", "project mode; bare form uses project_id from config/env, or pass --project=PVT_xxx")
+	fs.Var(&project, "project", "project mode; bare form uses env/config project id, or pass --project=PVT_xxx")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: gh claim-issue set-status <ISSUE> <STATUS_NAME> [--project[=ID]]")
 		fmt.Fprintln(fs.Output(), "  ISSUE: N | #N | owner/repo#N | owner/repo/N")
@@ -349,7 +349,7 @@ func cmdHandoff(args []string) error {
 		blockedStatus = fs.String("blocked-status", "Blocked", "Status option to move to when --block is set")
 		blockedLabel  = fs.String("blocked-label", "blocked", "label to add when --block is set")
 	)
-	fs.Var(&project, "project", "project mode; bare form uses project_id from config/env, or pass --project=PVT_xxx")
+	fs.Var(&project, "project", "project mode; bare form uses env/config project id, or pass --project=PVT_xxx")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: gh claim-issue handoff <ISSUE> --note \"...\" [--block \"reason\"]")
 		fs.PrintDefaults()
@@ -417,7 +417,7 @@ func cmdList(args []string) error {
 		mine      = fs.Bool("mine", false, "only items held by you (sub-agent matches viewer, or assignee == viewer)")
 		jsonOut   = fs.Bool("json", false, "emit JSON")
 	)
-	fs.Var(&project, "project", "project mode; bare form uses project_id from config/env, or pass --project=PVT_xxx")
+	fs.Var(&project, "project", "project mode; bare form uses env/config project id, or pass --project=PVT_xxx")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: gh claim-issue list [--agent-name NAME] [--mine] [--project[=ID]]")
 		fs.PrintDefaults()
@@ -490,8 +490,8 @@ func truncate(s string, max int) string {
 
 // resolveProjectID picks the effective project id. Priority:
 //   1. explicit --project=VALUE
-//   2. config.ProjectID
-//   3. GH_CLAIM_ISSUE_PROJECT_ID env var (treated like --project bare)
+//   2. GH_CLAIM_ISSUE_PROJECT_ID env var
+//   3. config.ProjectID
 //
 // The bare --project form forces a project mode and falls back through
 // the same priority list (skipping itself).
@@ -500,18 +500,18 @@ func resolveProjectID(flagVal *projectFlag, cfg *config.Config) (string, error) 
 		if flagVal.value != "" {
 			return flagVal.value, nil
 		}
-		if cfg.ProjectID != "" {
-			return cfg.ProjectID, nil
-		}
 		if env := strings.TrimSpace(os.Getenv(envProjectID)); env != "" {
 			return env, nil
 		}
-		return "", fmt.Errorf("--project given without a value, but project_id is not set in config or %s", envProjectID)
+		if cfg.ProjectID != "" {
+			return cfg.ProjectID, nil
+		}
+		return "", fmt.Errorf("--project given without a value, but %s is not set and project_id is not in config", envProjectID)
 	}
-	if cfg.ProjectID != "" {
-		return cfg.ProjectID, nil
+	if env := strings.TrimSpace(os.Getenv(envProjectID)); env != "" {
+		return env, nil
 	}
-	return strings.TrimSpace(os.Getenv(envProjectID)), nil
+	return cfg.ProjectID, nil
 }
 
 // resolveRepo parses --repo, or auto-detects the current repo in repo mode.
@@ -550,8 +550,8 @@ Usage:
 Flags (claim):
   --repo owner/name        target repo (default: current repo; optional in project mode)
   --project[=ID]           claim from a Projects v2 board; bare form uses
-                           project_id from config or %s,
-                           --project=PVT_xxx overrides
+                           %s if set, otherwise project_id
+                           from config. --project=PVT_xxx overrides both.
   --agent-name NAME        sub-agent identifier (required when sub_agent_field is set)
   --generate-agent-name    pick a random adjective-noun name (%d×%d=%d combos)
   --lock-wait DURATION     wait this long for the local mutex (default 30s)
@@ -586,8 +586,8 @@ Defaults:
   An issue is available when it is OPEN, unassigned, and not blocked by a
   GitHub issue dependency. A YAML file at $XDG_CONFIG_HOME/gh-claim-issue/
   config.yml may further restrict availability — run "init-config" to
-  scaffold one. The env var %s overrides
-  the project id when neither --project=ID nor config.project_id is set.
+  scaffold one. Project id precedence is --project=ID > %s
+  > config.project_id.
 
   In project mode (--project, config.project_id, or %s) the
   candidate pool is the project's items across every repo. Pass --repo

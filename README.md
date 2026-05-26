@@ -57,7 +57,7 @@ gh claim-issue --json
 
 | Variable | Effect |
 |---|---|
-| `GH_CLAIM_ISSUE_PROJECT_ID` | Used as the project id when neither `--project=ID` nor `config.project_id` is set. Lets CI / orchestrators inject project context without writing a config file. |
+| `GH_CLAIM_ISSUE_PROJECT_ID` | Project id. Precedence is `--project=ID` > `GH_CLAIM_ISSUE_PROJECT_ID` > `config.project_id`. Lets CI / orchestrators inject project context (or override a checked-in config) without editing the YAML. |
 
 ## Availability rules
 
