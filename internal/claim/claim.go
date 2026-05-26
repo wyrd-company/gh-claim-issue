@@ -16,8 +16,9 @@ import (
 
 // Options bundles request-time inputs for a claim attempt.
 type Options struct {
-	Owner     string
-	Repo      string
+	Owner     string // target repo owner; empty in project mode means "any"
+	Repo      string // target repo name; empty in project mode means "any"
+	ProjectID string // overrides config.ProjectID when non-empty
 	AgentName string        // optional; required when config.SubAgentField is set
 	LockWait  time.Duration // total time to wait for the cross-process lock
 }
@@ -39,9 +40,24 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		return nil, errors.New("config has sub_agent_field set; pass --agent-name to identify this agent")
 	}
 
+	projectID := opts.ProjectID
+	if projectID == "" {
+		projectID = cfg.ProjectID
+	}
+	if projectID == "" && (opts.Owner == "" || opts.Repo == "") {
+		return nil, errors.New("repo is required when not in project mode")
+	}
+
+	// In project mode the pool is the project's items across every repo, so
+	// serialise on the project. Otherwise serialise on the repo.
+	lockKey := opts.Owner + "/" + opts.Repo
+	if projectID != "" {
+		lockKey = "project:" + projectID
+	}
+
 	lockCtx, cancel := context.WithTimeout(ctx, opts.LockWait)
 	defer cancel()
-	release, lockPath, err := lock.Acquire(lockCtx, opts.Owner+"/"+opts.Repo, 250*time.Millisecond)
+	release, lockPath, err := lock.Acquire(lockCtx, lockKey, 250*time.Millisecond)
 	if err != nil {
 		return nil, err
 	}
@@ -69,8 +85,8 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		}
 		agentField = f
 	}
-	if cfg.ProjectID != "" && (len(cfg.ProjectStatuses) > 0 || cfg.ClaimStatus != "") {
-		statusField, err = gh.LookupSingleSelectField(cfg.ProjectID, "Status")
+	if projectID != "" && (len(cfg.ProjectStatuses) > 0 || cfg.ClaimStatus != "") {
+		statusField, err = gh.LookupSingleSelectField(projectID, "Status")
 		if err != nil {
 			return nil, err
 		}
@@ -98,7 +114,7 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		}
 	}
 
-	candidates, err := buildCandidates(gh, cfg, agentField, opts)
+	candidates, err := buildCandidates(gh, cfg, projectID, agentField, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +146,7 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		if chosen.ItemID == "" {
 			return res, fmt.Errorf("claim_status requested but %s has no project item (project_id mismatch?)", chosen.Issue.URL)
 		}
-		if err := gh.SetSingleSelectField(cfg.ProjectID, chosen.ItemID, statusField.FieldID, statusOptID); err != nil {
+		if err := gh.SetSingleSelectField(projectID, chosen.ItemID, statusField.FieldID, statusOptID); err != nil {
 			return res, fmt.Errorf("move %s to status %q: %w", chosen.Issue.URL, cfg.ClaimStatus, err)
 		}
 		res.StatusMoved = cfg.ClaimStatus
@@ -139,10 +155,10 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 	return res, nil
 }
 
-func buildCandidates(gh *ghapi.Client, cfg *config.Config, agentField *ghapi.OrgIssueField, opts Options) ([]ghapi.ProjectItem, error) {
+func buildCandidates(gh *ghapi.Client, cfg *config.Config, projectID string, agentField *ghapi.OrgIssueField, opts Options) ([]ghapi.ProjectItem, error) {
 	var pool []ghapi.ProjectItem
-	if cfg.ProjectID != "" {
-		items, err := projectCandidates(gh, cfg, opts)
+	if projectID != "" {
+		items, err := projectCandidates(gh, cfg, projectID, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -200,21 +216,24 @@ func repoCandidates(gh *ghapi.Client, cfg *config.Config, opts Options) ([]ghapi
 	return out, nil
 }
 
-func projectCandidates(gh *ghapi.Client, cfg *config.Config, opts Options) ([]ghapi.ProjectItem, error) {
+func projectCandidates(gh *ghapi.Client, cfg *config.Config, projectID string, opts Options) ([]ghapi.ProjectItem, error) {
 	statusField := ""
 	if len(cfg.ProjectStatuses) > 0 {
 		statusField = "Status"
 	}
-	items, err := gh.ListProjectIssues(cfg.ProjectID, statusField, 500)
+	items, err := gh.ListProjectIssues(projectID, statusField, 500)
 	if err != nil {
 		return nil, err
 	}
 	allowedStatus := lowerSet(cfg.ProjectStatuses)
+	repoFilter := opts.Owner != "" && opts.Repo != ""
 	out := make([]ghapi.ProjectItem, 0, len(items))
 	for _, it := range items {
-		if !strings.EqualFold(it.Issue.Repository.Owner, opts.Owner) ||
-			!strings.EqualFold(it.Issue.Repository.Name, opts.Repo) {
-			continue
+		if repoFilter {
+			if !strings.EqualFold(it.Issue.Repository.Owner, opts.Owner) ||
+				!strings.EqualFold(it.Issue.Repository.Name, opts.Repo) {
+				continue
+			}
 		}
 		if len(it.Issue.Assignees) > 0 {
 			continue
@@ -227,7 +246,7 @@ func projectCandidates(gh *ghapi.Client, cfg *config.Config, opts Options) ([]gh
 				continue
 			}
 		}
-		blocked, err := gh.BlockedBy(opts.Owner, opts.Repo, it.Issue.Number)
+		blocked, err := gh.BlockedBy(it.Issue.Repository.Owner, it.Issue.Repository.Name, it.Issue.Number)
 		if err != nil {
 			return nil, err
 		}

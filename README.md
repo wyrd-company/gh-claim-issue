@@ -26,6 +26,13 @@ gh claim-issue --repo wyrd-company/widgets --generate-agent-name
 # Bring your own agent name (required if sub_agent_field is configured):
 gh claim-issue --agent-name eldritch-netrunner
 
+# Claim from a Projects v2 board across every repo it spans
+# (uses project_id from config):
+gh claim-issue --project
+
+# Override the configured project, and narrow to one repo:
+gh claim-issue --project=PVT_kwDOABCDEF --repo wyrd-company/widgets
+
 # Machine-readable output:
 gh claim-issue --json
 ```
@@ -50,6 +57,26 @@ By default an issue is **available** when it is:
 The "first" available issue is the oldest by creation date (FIFO).
 
 Additional rules can be layered in via configuration.
+
+### Repo vs project scope
+
+By default the pool is the issues in a single repository — current repo
+unless `--repo owner/name` says otherwise.
+
+When `--project` is passed (or `project_id` is set in config), the pool is
+the items on that Projects v2 board across every repo. `--repo` becomes
+**optional** in project mode: pass it to narrow the pool to one repo on
+the board, or omit it to consider the whole project.
+
+`--project` accepts an optional value:
+
+| Form | Effect |
+|---|---|
+| `--project` | Use `project_id` from config. Errors if not set. |
+| `--project=PVT_kwDOA...` | Override (or supply) the project id. |
+
+Note: `--project VALUE` (space-separated) does **not** consume the next
+arg as the value — use the `=` form.
 
 ## Configuration
 
@@ -106,9 +133,11 @@ any mutation happens.
 
 ## Multi-agent coordination
 
-Each invocation takes a cross-process file lock (via `flock(2)`) keyed on
-`owner/repo` and stored in the user's cache dir. So if two agents on the
-same machine race for the same backlog:
+Each invocation takes a cross-process file lock (via `flock(2)`) stored
+in the user's cache dir. The key is the project id when in project mode
+(so all agents racing for the same project pool serialise, regardless of
+any `--repo` filter), and `owner/repo` otherwise. So if two agents on
+the same machine race for the same backlog:
 
 ```
 agent A: gh claim-issue   ┐
