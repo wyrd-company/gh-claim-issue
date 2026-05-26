@@ -29,7 +29,11 @@ func run(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "generate-name":
-			fmt.Println(names.Generate())
+			n, err := names.Generate()
+			if err != nil {
+				return err
+			}
+			fmt.Println(n)
 			return nil
 		case "init-config":
 			return cmdInitConfig()
@@ -67,7 +71,11 @@ func cmdClaim(args []string) error {
 	}
 
 	if *genName && *agentName == "" {
-		*agentName = names.Generate()
+		n, err := names.Generate()
+		if err != nil {
+			return err
+		}
+		*agentName = n
 	}
 
 	gh, err := ghapi.New()

@@ -1,6 +1,10 @@
 // Package names produces random two-word agent identifiers from a curated
 // list of 50 adjectives and 50 nouns drawn from programmer, fantasy,
 // mythology, sci-fi, and cyberpunk vocabularies (2,500 unique pairings).
+//
+// Generate maintains a rolling history of the most recent HistorySize
+// names so the same identifier won't be handed out twice within that
+// window, even across processes (the history file is mutex'd via flock).
 package names
 
 import (
@@ -33,18 +37,6 @@ var nouns = [...]string{
 	"sigil", "glyph", "codex", "talisman", "monolith",
 	"nebula", "quasar", "pulsar", "singularity", "specter",
 	"banshee", "revenant", "shoggoth", "icebreaker", "wetware",
-}
-
-// Generate returns a random "adjective-noun" identifier.
-func Generate() string {
-	a := pick(len(adjectives))
-	n := pick(len(nouns))
-	return fmt.Sprintf("%s-%s", adjectives[a], nouns[n])
-}
-
-// Counts exposes the size of each list for tests and help text.
-func Counts() (adj, noun int) {
-	return len(adjectives), len(nouns)
 }
 
 func pick(n int) int {
