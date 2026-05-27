@@ -136,6 +136,19 @@ claim_status: "In Progress"
 #   "<title>" — a literal iteration title
 # Items with no iteration assignment are excluded.
 project_iteration: "current"
+
+# Allow/deny filters on org-level Issue Field values. Each rule names a
+# field and lists accepted (allow) and/or rejected (deny) values; matching
+# is case-insensitive. Deny is checked first, then allow (when set) must
+# include the current value. Use "" to match issues with no value.
+field_rules:
+  - field: "Priority"
+    allow:
+      - P0
+      - P1
+  - field: "Area"
+    deny:
+      - Infrastructure
 ```
 
 ### About `sub_agent_field`
@@ -152,6 +165,21 @@ name" check is genuinely global.
 Requires `project_id`. The value must be one of the options on the
 project's `Status` single-select field. A typo fails the run before
 any mutation happens.
+
+### About `field_rules`
+
+Each entry filters candidates by the current value of an org-level issue
+field (looked up against the target owner's org). `deny` is checked
+first; if matched, the issue is dropped. Otherwise, if `allow` is set,
+the value must be in it. Comparisons are case-insensitive. For
+`single_select` fields, list the option *name* (the API stores option
+ids but `field_rules` resolves them for you). For `text`/`number`/`date`
+fields, list the literal value. An empty string (`""`) matches issues
+that have no value for that field.
+
+Because issue fields are org-scoped, `field_rules` needs a target owner
+— pass `--repo OWNER/NAME` (it also works in `--project` mode when
+`--repo` narrows the pool to one owner).
 
 ### About `project_iteration`
 

@@ -4,6 +4,7 @@ package claim
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,6 +14,16 @@ import (
 	"github.com/boblangley/gh-claim-issue/internal/ghapi"
 	"github.com/boblangley/gh-claim-issue/internal/lock"
 )
+
+// resolvedFieldRule pairs a config.FieldRule with the metadata of the
+// org-level field it references, so we can normalise stored values
+// (single_select option ids → option names) before comparing.
+type resolvedFieldRule struct {
+	field      *ghapi.OrgIssueField
+	allow      map[string]struct{} // lowercased; nil/empty means no allow restriction
+	deny       map[string]struct{} // lowercased
+	optionByID map[int64]string    // single_select only: option id → lowercased name
+}
 
 // Options bundles request-time inputs for a claim attempt.
 type Options struct {
@@ -101,6 +112,11 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		}
 	}
 
+	fieldRules, err := resolveFieldRules(gh, cfg, opts.Owner)
+	if err != nil {
+		return nil, err
+	}
+
 	var iterationFilterID string
 	if projectID != "" && cfg.ProjectIteration != "" {
 		itField, err := gh.LookupIterationField(projectID, "Iteration")
@@ -129,7 +145,7 @@ func Run(ctx context.Context, gh *ghapi.Client, cfg *config.Config, opts Options
 		}
 	}
 
-	candidates, err := buildCandidates(gh, cfg, projectID, agentField, iterationFilterID, opts)
+	candidates, err := buildCandidates(gh, cfg, projectID, agentField, fieldRules, iterationFilterID, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +227,7 @@ func resolveIteration(field *ghapi.ProjectIterationField, spec string) (*ghapi.P
 	return it, nil
 }
 
-func buildCandidates(gh *ghapi.Client, cfg *config.Config, projectID string, agentField *ghapi.OrgIssueField, iterationFilterID string, opts Options) ([]ghapi.ProjectItem, error) {
+func buildCandidates(gh *ghapi.Client, cfg *config.Config, projectID string, agentField *ghapi.OrgIssueField, fieldRules []resolvedFieldRule, iterationFilterID string, opts Options) ([]ghapi.ProjectItem, error) {
 	var pool []ghapi.ProjectItem
 	if projectID != "" {
 		items, err := projectCandidates(gh, cfg, projectID, iterationFilterID, opts)
@@ -227,7 +243,7 @@ func buildCandidates(gh *ghapi.Client, cfg *config.Config, projectID string, age
 		pool = items
 	}
 
-	if agentField == nil {
+	if agentField == nil && len(fieldRules) == 0 {
 		return pool, nil
 	}
 	out := make([]ghapi.ProjectItem, 0, len(pool))
@@ -236,18 +252,88 @@ func buildCandidates(gh *ghapi.Client, cfg *config.Config, projectID string, age
 		if err != nil {
 			return nil, err
 		}
-		taken := false
-		for _, v := range vals {
-			if v.FieldID == agentField.ID && strings.TrimSpace(v.AsText()) != "" {
-				taken = true
-				break
+		if agentField != nil {
+			taken := false
+			for _, v := range vals {
+				if v.FieldID == agentField.ID && strings.TrimSpace(v.AsText()) != "" {
+					taken = true
+					break
+				}
+			}
+			if taken {
+				continue
 			}
 		}
-		if !taken {
-			out = append(out, it)
+		if !passesFieldRules(vals, fieldRules) {
+			continue
 		}
+		out = append(out, it)
 	}
 	return out, nil
+}
+
+func resolveFieldRules(gh *ghapi.Client, cfg *config.Config, owner string) ([]resolvedFieldRule, error) {
+	if len(cfg.FieldRules) == 0 {
+		return nil, nil
+	}
+	if owner == "" {
+		return nil, errors.New("field_rules requires a target owner; pass --repo OWNER/NAME")
+	}
+	out := make([]resolvedFieldRule, 0, len(cfg.FieldRules))
+	for _, r := range cfg.FieldRules {
+		f, err := gh.FindOrgIssueField(owner, r.Field)
+		if err != nil {
+			return nil, fmt.Errorf("field_rules: %w", err)
+		}
+		rr := resolvedFieldRule{
+			field: f,
+			allow: lowerSet(r.Allow),
+			deny:  lowerSet(r.Deny),
+		}
+		if strings.EqualFold(f.Type, "single_select") {
+			rr.optionByID = make(map[int64]string, len(f.Options))
+			for _, o := range f.Options {
+				rr.optionByID[o.ID] = strings.ToLower(o.Name)
+			}
+		}
+		out = append(out, rr)
+	}
+	return out, nil
+}
+
+func passesFieldRules(vals []ghapi.IssueFieldValue, rules []resolvedFieldRule) bool {
+	for _, r := range rules {
+		current := currentFieldValue(vals, r)
+		if _, bad := r.deny[current]; len(r.deny) > 0 && bad {
+			return false
+		}
+		if len(r.allow) > 0 {
+			if _, ok := r.allow[current]; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// currentFieldValue returns the comparable lowercased form of the issue's
+// value for rule r — option name for single_select, AsText otherwise, ""
+// when unset.
+func currentFieldValue(vals []ghapi.IssueFieldValue, r resolvedFieldRule) string {
+	for _, v := range vals {
+		if v.FieldID != r.field.ID {
+			continue
+		}
+		if r.optionByID != nil {
+			var id int64
+			if err := json.Unmarshal(v.Value, &id); err != nil {
+				return ""
+			}
+			return r.optionByID[id]
+		}
+		return strings.ToLower(strings.TrimSpace(v.AsText()))
+	}
+	return ""
 }
 
 func repoCandidates(gh *ghapi.Client, cfg *config.Config, opts Options) ([]ghapi.ProjectItem, error) {
