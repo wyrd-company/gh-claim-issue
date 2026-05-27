@@ -50,6 +50,29 @@ type Config struct {
 	//
 	// Items with no iteration assignment are excluded when this is set.
 	ProjectIteration string `yaml:"project_iteration"`
+
+	// FieldRules layers allow/deny filters on top of org-level Issue Field
+	// values. Each rule names a field and lists values that are accepted
+	// (allow) and/or rejected (deny). Matching is case-insensitive. When
+	// both lists are present a deny match excludes the issue first; an
+	// allow list (when set) then requires the current value to be in it.
+	// An unset field is matched as the empty string "".
+	FieldRules []FieldRule `yaml:"field_rules"`
+}
+
+// FieldRule describes one allow/deny filter on an org-level issue field.
+type FieldRule struct {
+	// Field is the name of an org-level GitHub Issue Field. Resolved
+	// against the target owner's org-level fields, same as SubAgentField.
+	Field string `yaml:"field"`
+
+	// Allow, when non-empty, requires the field's current value to be one
+	// of these (case-insensitive). Use "" to allow issues with no value.
+	Allow []string `yaml:"allow,omitempty"`
+
+	// Deny excludes any issue whose field value matches one of these
+	// (case-insensitive). Use "" to exclude issues with no value.
+	Deny []string `yaml:"deny,omitempty"`
 }
 
 // Path returns the conventional location of the config file:
@@ -98,6 +121,14 @@ func (c *Config) validate() error {
 	}
 	if c.ProjectIteration != "" && c.ProjectID == "" {
 		return errors.New("project_iteration requires project_id")
+	}
+	for i, r := range c.FieldRules {
+		if r.Field == "" {
+			return fmt.Errorf("field_rules[%d]: field name is required", i)
+		}
+		if len(r.Allow) == 0 && len(r.Deny) == 0 {
+			return fmt.Errorf("field_rules[%d] (%q): set at least one of allow or deny", i, r.Field)
+		}
 	}
 	return nil
 }
@@ -152,4 +183,18 @@ const sample = `# gh-claim-issue configuration
 # Accepted: "current", "next", or a literal iteration title (e.g. "Sprint 4").
 # Items with no iteration are excluded.
 # project_iteration: "current"
+
+# Allow/deny filters on org-level Issue Field values. Each rule names a
+# field and lists accepted (allow) and/or rejected (deny) values; matching
+# is case-insensitive. When both lists are present a deny match excludes
+# the issue first, then allow (if set) requires the value to be in the
+# list. Use "" to match issues with no value for that field.
+# field_rules:
+#   - field: "Priority"
+#     allow:
+#       - P0
+#       - P1
+#   - field: "Area"
+#     deny:
+#       - Infrastructure
 `
