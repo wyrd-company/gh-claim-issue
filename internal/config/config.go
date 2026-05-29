@@ -112,16 +112,13 @@ func Load() (*Config, string, error) {
 	return &c, path, nil
 }
 
+// validate checks invariants that hold regardless of where the project id
+// comes from. Project-dependent keys (project_statuses, claim_status,
+// project_iteration) are deliberately NOT checked here: the effective project
+// id may be supplied at runtime via --project or GH_CLAIM_ISSUE_PROJECT_ID,
+// neither of which Load() can see. Those are validated by ValidateProjectID
+// once the effective id has been resolved.
 func (c *Config) validate() error {
-	if len(c.ProjectStatuses) > 0 && c.ProjectID == "" {
-		return errors.New("project_statuses requires project_id")
-	}
-	if c.ClaimStatus != "" && c.ProjectID == "" {
-		return errors.New("claim_status requires project_id")
-	}
-	if c.ProjectIteration != "" && c.ProjectID == "" {
-		return errors.New("project_iteration requires project_id")
-	}
 	for i, r := range c.FieldRules {
 		if r.Field == "" {
 			return fmt.Errorf("field_rules[%d]: field name is required", i)
@@ -129,6 +126,27 @@ func (c *Config) validate() error {
 		if len(r.Allow) == 0 && len(r.Deny) == 0 {
 			return fmt.Errorf("field_rules[%d] (%q): set at least one of allow or deny", i, r.Field)
 		}
+	}
+	return nil
+}
+
+// ValidateProjectID checks the project-dependent config keys against the
+// effective project id resolved at runtime (from --project, the
+// GH_CLAIM_ISSUE_PROJECT_ID env var, or config.project_id). When the effective
+// id is empty, any project-dependent key is a misconfiguration.
+func (c *Config) ValidateProjectID(effectiveID string) error {
+	if effectiveID != "" {
+		return nil
+	}
+	const hint = " (set project_id in config, export GH_CLAIM_ISSUE_PROJECT_ID, or pass --project=ID)"
+	if len(c.ProjectStatuses) > 0 {
+		return errors.New("project_statuses requires a project id" + hint)
+	}
+	if c.ClaimStatus != "" {
+		return errors.New("claim_status requires a project id" + hint)
+	}
+	if c.ProjectIteration != "" {
+		return errors.New("project_iteration requires a project id" + hint)
 	}
 	return nil
 }
