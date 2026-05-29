@@ -114,6 +114,9 @@ func cmdClaim(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := cfg.ValidateProjectID(projectID); err != nil {
+		return err
+	}
 	projectMode := projectID != ""
 
 	owner, name, err := resolveRepo(*repoFlag, projectMode)
